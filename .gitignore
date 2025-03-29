@@ -1,4 +1,17 @@
+# Python
 *pycache*
-venv
-*.ipynb
+src/__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+   
+# Local files
+temp/
+uploads/
 *.DS_Store
+*.ipynb
+*key.json
+
+# Google Cloud
+.gcloudignore

@@ -342,9 +342,5 @@ def process_media():
 atexit.register(app_utils.delete_temp_directory)
 
 if __name__ == '__main__':
-    # Log cleanup settings
-    app.logger.info(f"Temporary files will be automatically deleted after {app_utils.MAX_FILE_AGE} seconds")
-    app.logger.info(f"Cleanup runs every {app_utils.CLEANUP_INTERVAL} seconds")
-    
-    # Run the app
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)

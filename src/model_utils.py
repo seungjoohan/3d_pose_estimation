@@ -7,15 +7,59 @@ import matplotlib
 # Set Matplotlib to use a non-GUI backend to avoid thread issues
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import tempfile
+import os
 from enum import Enum
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('model_utils')
 
+# General utility functions
+def get_project_root():
+    """Get the absolute path to the project root directory."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def get_model_directory():
+    """Get the absolute path to the model directory."""
+    return os.path.join(get_project_root(), 'model')
+
+def ensure_directory_exists(directory_path):
+    """Ensure that a directory exists, creating it if necessary."""
+    if not os.path.exists(directory_path):
+        os.makedirs(directory_path)
+        logger.info(f"Created directory: {directory_path}")
+    return directory_path
+
+def get_model_path():
+    """Get the absolute path to the model file."""
+    if os.environ.get('K_SERVICE'):
+        from google.cloud import storage
+        temp_dir = tempfile.mkdtemp()
+        destination = os.path.join(temp_dir, 'keypoint_estimation')
+        os.makedirs(destination, exist_ok=True)
+
+        client = storage.Client()
+        bucket = client.bucket(f"{os.environ.get('GOOGLE_CLOUD_PROJECT')}-models")
+        blobs = list(bucket.list_blobs(prefix='keypoint_estimation'))
+        for blob in blobs:
+            if blob.name.endswith('/'):
+                continue
+            rel_path = blob.name.replace('keypoint_estimation/', '')
+            if not rel_path:
+                continue
+
+            dest_path = os.path.join(destination, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            blob.download_to_filename(dest_path)
+
+        return destination
+    else:
+        return os.path.join(get_project_root(), 'model', 'keypoint_estimation')
+
 # Global variables
 MODEL = None
-MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model", "keypoint_estimation")  # Default path to your model
+MODEL_PATH = get_model_path()
 logger.info(f"Using model path: {MODEL_PATH}")
 print(MODEL_PATH)
 
@@ -96,22 +140,6 @@ class KeyPointConnections:
         {"from": KeyPoints.RIGHT_ANKLE, "to": KeyPoints.RIGHT_TOE, "color": (25, 25, 175)},
         {"from": KeyPoints.LEFT_ANKLE, "to": KeyPoints.LEFT_TOE, "color": (255, 25, 25)}
     ]
-
-# General utility functions
-def get_project_root():
-    """Get the absolute path to the project root directory."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-def get_model_directory():
-    """Get the absolute path to the model directory."""
-    return os.path.join(get_project_root(), 'model')
-
-def ensure_directory_exists(directory_path):
-    """Ensure that a directory exists, creating it if necessary."""
-    if not os.path.exists(directory_path):
-        os.makedirs(directory_path)
-        logger.info(f"Created directory: {directory_path}")
-    return directory_path
 
 # Model loading functions
 def load_model(model_path=None):
