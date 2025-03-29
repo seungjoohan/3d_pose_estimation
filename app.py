@@ -12,9 +12,8 @@ import src.app_utils as app_utils
 import src.model_utils as model_utils
 
 # # Set up environment for development if needed
-# if os.environ.get('FLASK_ENV') != 'production':
-#     os.environ['FLASK_ENV'] = 'development'
-os.environ['FLASK_ENV'] = 'production'
+if os.environ.get('FLASK_ENV') != 'production':
+    os.environ['FLASK_ENV'] = 'development'
 
 app = Flask(__name__)
 
