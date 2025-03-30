@@ -9,6 +9,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tempfile
 import os
+import gc
 from enum import Enum
 
 # Configure logging
@@ -40,7 +41,7 @@ def get_model_path():
         os.makedirs(destination, exist_ok=True)
 
         client = storage.Client()
-        bucket = client.bucket(f"{os.environ.get('GOOGLE_CLOUD_PROJECT')}-models")
+        bucket = client.bucket("pose-app-models")
         blobs = list(bucket.list_blobs(prefix='keypoint_estimation'))
         for blob in blobs:
             if blob.name.endswith('/'):
@@ -442,121 +443,159 @@ def predict(image_path, model=None):
         raise
 
 def process_video(video_path, model=None, frame_interval=5):
-    """
-    Process a video file frame by frame.
+    """Process video for pose estimation with batch processing.
     
     Args:
         video_path: Path to the video file
         model: The model to use (loads the global model if None)
-        frame_interval: Process every Nth frame
+        frame_interval: Process every nth frame
         
     Returns:
-        List of frame results with keypoints and visualization
+        Dictionary containing keypoints_all, video_info, and plots
     """
-    try:
-        # Load model if not provided
-        if model is None:
-            model = load_model()
-        
-        # Open the video file
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video file {video_path}")
-        
-        # Get video properties
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        logger.info(f"Video properties: {fps} fps, {frame_width}x{frame_height}, {total_frames} total frames")
-        
-        frame_count = 0
-        results = []
-        
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Process every Nth frame
-            if frame_count % frame_interval == 0:
-                logger.info(f"Processing frame {frame_count}/{total_frames}")
-                
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Save frame temporarily to use predict function
-                temp_frame_path = f"/tmp/frame_{frame_count}.jpg"
-                cv2.imwrite(temp_frame_path, frame)
-                
-                try:
-                    # Use the same prediction logic as for images
-                    org_img, real_coords, normalized_coords, z_scaled = predict(temp_frame_path, model)
-                    
-                    # Generate plot for this frame
-                    plot_base64 = plot_keypoints_to_base64(org_img, normalized_coords, z_scaled)
-                    
-                    # Convert keypoints to the format expected by the frontend with keypoint names
-                    keypoints = []
-                    for i, point in enumerate(real_coords):
-                        # Get keypoint name from enum if within range
-                        keypoint_name = KeyPoints(i).name if i < len(KeyPoints) else f"KEYPOINT_{i}"
-                        
-                        # Create keypoint dict with coordinates and confidence
-                        keypoint = {
-                            'id': i,
-                            'name': keypoint_name,
-                            'x': float(point[0]),
-                            'y': float(point[1]),
-                            'z': float(z_scaled[i]) if i < len(z_scaled) else 0.0,
-                            'confidence': float(point[2]),
-                            'frame': frame_count
-                        }
-                        keypoints.append(keypoint)
-                    
-                    # Add result for this frame
-                    results.append({
-                        'frame': frame_count,
-                        'timestamp': frame_count / fps,
-                        'keypoints': keypoints,
-                        'plot': plot_base64
-                    })
-                    
-                except Exception as e:
-                    logger.error(f"Error processing frame {frame_count}: {str(e)}")
-                
-                # Clean up temp file
-                try:
-                    os.remove(temp_frame_path)
-                except:
-                    pass
-            
-            frame_count += 1
-            
-            # For development/testing, limit to 20 frames
-            if os.getenv('FLASK_ENV') == 'development' and len(results) >= 20:
-                logger.info("Development mode: Limiting to 20 processed frames")
-                break
-        
-        cap.release()
-        
-        # Get video metadata
-        video_info = {
-            'fps': fps,
-            'width': frame_width,
-            'height': frame_height,
-            'total_frames': total_frames,
-            'processed_frames': len(results)
-        }
-        
-        return results, video_info
+    if model is None:
+        model = load_model()
     
-    except Exception as e:
-        logger.error(f"Error processing video: {e}", exc_info=True)
-        raise
+    # Open the video
+    video = cv2.VideoCapture(video_path)
+    if not video.isOpened():
+        raise ValueError(f"Could not open video at {video_path}")
+    
+    # Get video properties
+    fps = int(video.get(cv2.CAP_PROP_FPS))
+    total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    logger.info(f"Processing video: {total_frames} frames, {fps} fps, resolution {width}x{height}")
+    
+    # Extract frames at specified interval
+    frame_indices = []
+    frames = []
+    current_frame = 0
+    
+    while True:
+        ret, frame = video.read()
+        if not ret:
+            break
+        
+        if current_frame % frame_interval == 0:
+            frame_indices.append(current_frame)
+            frames.append(frame)
+        
+        current_frame += 1
+    
+    video.release()
+    
+    logger.info(f"Extracted {len(frames)} frames at interval {frame_interval}")
+    
+    # Process frames in batches
+    BATCH_SIZE = 8
+    keypoints_all = []
+    plots = {}  # Dictionary to store frame_index -> plot_base64
+    
+    for batch_start in range(0, len(frames), BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, len(frames))
+        batch_frames = frames[batch_start:batch_end]
+        batch_indices = frame_indices[batch_start:batch_end]
+        
+        logger.info(f"Processing batch of {len(batch_frames)} frames")
+        
+        # Prepare batch input
+        input_shape = model.input_shape
+        batch_input = np.zeros((len(batch_frames), input_shape[1], input_shape[2], input_shape[3]), dtype=np.float32)
+        
+        for i, frame in enumerate(batch_frames):
+            # Resize frame to model input size
+            resized_frame = cv2.resize(frame, (input_shape[2], input_shape[1]))
+            # Add to batch (no need to expand_dims as we're already building a batch)
+            batch_input[i] = resized_frame
+        
+        # Process batch
+        batch_results = model.predict(batch_input, verbose=0)
+        
+        # Extract results
+        heatmap_2d = [batch_results[i] for i in range(len(model.output_shape)) if len(model.output_shape[i]) == 4][-1]
+        keypoints_3d = [batch_results[i] for i in range(len(model.output_shape)) if len(model.output_shape[i]) == 2][-1]
+        
+        # Process each frame in the batch
+        for i in range(len(batch_frames)):
+            frame = batch_frames[i]
+            frame_index = batch_indices[i]
+            
+            # Get 2D keypoints from heatmap
+            keypoints_2d = convert_heatmap_to_keypoints(np.expand_dims(heatmap_2d[i], axis=0))
+            
+            # Scale keypoints to original frame size
+            real_coords = scale_keypoints(keypoints_2d, 
+                                          model.output_shape[1][1], 
+                                          model.output_shape[1][2], 
+                                          height, width)
+            
+            # Normalize coordinates
+            normalized_coords = [(((x[0]) / height), ((x[1]) / width), x[2]) for x in real_coords]
+            
+            # Calculate Z coordinates
+            z_coords = keypoints_3d[i][:24] - np.sum(keypoints_3d[i][:24] * com_weights)
+            x_std = np.std([p[0] for p in real_coords]) / np.max((height, width))
+            y_std = np.std([p[1] for p in real_coords]) / np.max((height, width))
+            scale = (x_std + y_std) / 2
+            z_scaled = z_coords * scale
+            
+            # Generate 3D plot for keyframes
+            plot_base64 = None
+            try:
+                plot_base64 = plot_keypoints_to_base64(frame, normalized_coords, z_scaled)
+            except Exception as e:
+                logger.warning(f"Could not generate plot for frame {frame_index}: {e}")
+            
+            # Prepare keypoint data for this frame
+            from src.model_utils import KeyPoints
+            frame_keypoints = []
+            
+            for j, point in enumerate(real_coords):
+                if j >= 24:  # Ensure we don't exceed keypoint count
+                    break
+                    
+                # Get keypoint name from enum
+                keypoint_name = KeyPoints(j).name if j < len(KeyPoints) else f"KEYPOINT_{j}"
+                
+                # Create keypoint dict with coordinates, confidence and frame number
+                keypoint = {
+                    'id': j,
+                    'name': keypoint_name,
+                    'x': float(point[0]),
+                    'y': float(point[1]),
+                    'z': float(z_scaled[j]) if j < len(z_scaled) else 0.0,
+                    'confidence': float(point[2]),
+                    'frame': frame_index
+                }
+                frame_keypoints.append(keypoint)
+            
+            # Add keypoints and plot to results
+            keypoints_all.extend(frame_keypoints)
+            if plot_base64:
+                plots[frame_index] = plot_base64
+        
+        # Free memory
+        gc.collect()
+    
+    logger.info(f"Processed {len(keypoints_all) // 24} frames, generated {len(plots)} plots")
+    
+    # Return all required data
+    return {
+        'keypoints': keypoints_all,
+        'video_info': {
+            'width': width,
+            'height': height,
+            'fps': fps,
+            'total_frames': total_frames,
+            'processed_frames': len(frames)
+        },
+        'plots': plots
+    }
 
-def plot_view(fig, grid_position, image, view_name, keypoints, color='blue'):
+def plot_view(fig, grid_position, image, view_name, keypoints, visibility_threshold=0.7, color='blue'):
         """
         Plot a view of the keypoints on an image.
         
@@ -591,9 +630,9 @@ def plot_view(fig, grid_position, image, view_name, keypoints, color='blue'):
             ax.plot3D((keypoints[line["from"].value, 0], keypoints[line["to"].value, 0]),
                     (keypoints[line["from"].value, 1], keypoints[line["to"].value, 1]),
                     (keypoints[line["from"].value, 2], keypoints[line["to"].value, 2]), color=color)
-        ax.set_xlim(-image.shape[1]/2, image.shape[1]/2)
-        ax.set_ylim(-image.shape[0]/2, image.shape[0]/2)
-        ax.set_zlim(-np.max(image.shape)/2, np.max(image.shape)/2)
+        ax.set_xlim(np.mean(keypoints[:, 0])-image.shape[1]/2, np.mean(keypoints[:, 0])+image.shape[1]/2)
+        ax.set_ylim(np.mean(keypoints[:, 1])-image.shape[0]/2, np.mean(keypoints[:, 1])+image.shape[0]/2)
+        ax.set_zlim(np.mean(keypoints[:, 2])-np.max(image.shape)/2, np.mean(keypoints[:, 2])+np.max(image.shape)/2)
         
         ax.view_init(elev=-90, azim=-90)
         ax.set_zticks([])
@@ -656,16 +695,16 @@ def plot_keypoints(image, keypoints_2d, keypoints_3d, figsize=(10, 10), color='b
     kp_sternum_sacrum = add_sternum_sacrum(keypoints)
 
     # Create a figure with 3 subplots for different views
-    fig = plt.figure(figsize=(figsize[0]*3, figsize[1]))
+    fig = plt.figure(figsize=(figsize[0]*2, figsize[1]))
     
     # 1. Front view (original)
-    plot_view(fig, (1, 3, 1), image, 'Front View', kp_sternum_sacrum, color=color)
+    plot_view(fig, (1, 2, 1), image, 'Front View', kp_sternum_sacrum, color=color)
     
     # 2. Side view (90 degrees rotated along x-axis)
-    plot_view(fig, (1, 3, 2), image, 'Side View (90° X-Rotation)', kp_sternum_sacrum, color=color)
+    plot_view(fig, (1, 2, 2), image, 'Side View (90° X-Rotation)', kp_sternum_sacrum, color=color)
     
-    # 3. Back view (180 degrees rotated along x-axis)
-    plot_view(fig, (1, 3, 3), image, 'Back View (180° X-Rotation)', kp_sternum_sacrum, color=color)
+    # # 3. Back view (180 degrees rotated along x-axis)
+    # plot_view(fig, (1, 3, 3), image, 'Back View (180° X-Rotation)', kp_sternum_sacrum, color=color)
     
     plt.tight_layout()
     return fig

@@ -274,20 +274,15 @@ def process_media():
                         raise ValueError(f"Failed to load pose estimation model for video: {str(model_load_error)}")
                 
                 # Process the video frames
-                frame_interval = 5  # Process every 5th frame
-                frame_results, video_info = model_utils.process_video(file_path, model, frame_interval=frame_interval)
+                frame_interval = 3  # Process every 3rd frame
+                video_results = model_utils.process_video(file_path, model, frame_interval=frame_interval)
                 
-                # Prepare keypoints data from all frames
-                keypoints = []
-                plots = {}  # Dictionary of frame_num -> plot_base64
+                # The process_video function now directly returns the formatted data
+                keypoints = video_results['keypoints']
+                video_info = video_results['video_info']
+                plots = video_results['plots']
                 
-                for result in frame_results:
-                    frame_num = result['frame']
-                    keypoints.extend(result['keypoints'])
-                    if result.get('plot'):
-                        plots[frame_num] = result['plot']
-                
-                app.logger.info(f"Processed {len(frame_results)} frames from video")
+                app.logger.info(f"Processed video with {video_info['processed_frames']} frames")
                 app.logger.info(f"Total keypoints: {len(keypoints)}")
                 
                 return jsonify({

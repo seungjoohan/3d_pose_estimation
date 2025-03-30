@@ -28,7 +28,7 @@ RUN mkdir -p /app/uploads /app/temp
 # Environment variables
 ENV PORT=8080
 ENV FLASK_ENV=production
-ENV GOOGLE_CLOUD_PROJECT=pose-app-455201
+ENV GOOGLE_CLOUD_PROJECT=pose-app
 
 # Make port 8080 available
 EXPOSE 8080
