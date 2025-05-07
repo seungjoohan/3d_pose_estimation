@@ -15,3 +15,6 @@ uploads/
 
 # Google Cloud
 .gcloudignore
+
+# Model files
+model/

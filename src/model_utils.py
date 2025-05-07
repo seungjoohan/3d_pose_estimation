@@ -56,6 +56,7 @@ def get_model_path():
 
         return destination
     else:
+        # For local development
         return os.path.join(get_project_root(), 'model', 'keypoint_estimation')
 
 # Global variables
@@ -190,31 +191,6 @@ def load_model(model_path=None):
             return create_mock_model()
         raise
 
-def create_mock_model():
-    """
-    Creates a mock model for testing or development purposes.
-    
-    Returns:
-        A simple mock model object that can be used for testing
-    """
-    # This is a very basic mock that can be expanded based on your needs
-    class MockModel:
-        def __init__(self):
-            self.input_shape = [None, 384, 384, 3]
-            self.output_shape = {
-                0: [None, 48, 48, 24],  # Heatmap
-                1: [None, 24]  # 3D keypoints
-            }
-        
-        def predict(self, input_data, verbose=0):
-            # Create random outputs that match the expected shapes
-            batch_size = input_data.shape[0]
-            heatmap = np.random.normal(0, 0.1, (batch_size, 48, 48, 24))
-            keypoints_3d = np.random.normal(0, 0.1, (batch_size, 24))
-            return [heatmap, keypoints_3d]
-    
-    return MockModel()
-
 def warmup_model(model):
     """
     Warm up the model with a dummy prediction to initialize weights.
@@ -225,7 +201,7 @@ def warmup_model(model):
     try:
         # Create a dummy input tensor
         # Adjust the shape based on your model's input requirements
-        dummy_input = np.zeros((1, 384, 384, 3), dtype=np.float32)
+        dummy_input = np.zeros(model.input_shape, dtype=np.float32)
         
         # Make a prediction
         _ = model.predict(dummy_input, verbose=0)
@@ -702,9 +678,6 @@ def plot_keypoints(image, keypoints_2d, keypoints_3d, figsize=(10, 10), color='b
     
     # 2. Side view (90 degrees rotated along x-axis)
     plot_view(fig, (1, 2, 2), image, 'Side View (90° X-Rotation)', kp_sternum_sacrum, color=color)
-    
-    # # 3. Back view (180 degrees rotated along x-axis)
-    # plot_view(fig, (1, 3, 3), image, 'Back View (180° X-Rotation)', kp_sternum_sacrum, color=color)
     
     plt.tight_layout()
     return fig
