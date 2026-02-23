@@ -228,8 +228,11 @@
                 xaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
                 yaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
                 zaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
-                aspectmode: 'cube',
-                camera: {eye: {x:0.1, y:-2.0, z:0.3}}
+                aspectmode: 'manual',
+                // Frontal view: eye at -Z (same side as original camera), up is -Y
+                // (image Y increases downward, so -Y = top of image = up on screen)
+                // This avoids the left-right mirror that +Z eye causes.
+                camera: {eye: {x:0, y:0, z:-2.5}, up: {x:0, y:-1, z:0}}
             },
             margin: {l:0, r:0, t:0, b:0},
             uirevision: 'fixed'  // keeps camera angle when data updates
@@ -273,11 +276,101 @@
             return Math.min(natural, maxH);
         }
 
-        function renderPose3D(divId, kp3d, height) {
+        // Compute fixed axis ranges from initial keypoints, keeping W:H proportions.
+        // Uses max normalized dispersion (spread / image-dim) as the scale factor so
+        // the person fills the view regardless of orientation, then projects back to
+        // pixel-space ranges that match the image aspect ratio exactly.
+        function computeAxisRanges(kp3d, imgW, imgH) {
+            const xs = kp3d.x, ys = kp3d.y, zs = kp3d.z;
+            const xC = (Math.max(...xs) + Math.min(...xs)) / 2;
+            const yC = (Math.max(...ys) + Math.min(...ys)) / 2;
+            const zC = (Math.max(...zs) + Math.min(...zs)) / 2;
+            const maxDim = Math.max(imgW, imgH);
+            // Fractional coverage normalised by each axis's natural image-space scale:
+            // X → imgW, Y → imgH, Z → imgW (Z has the same dimension as camera width)
+            const xFrac = (Math.max(...xs) - Math.min(...xs)) / imgW;
+            const yFrac = (Math.max(...ys) - Math.min(...ys)) / imgH;
+            const zFrac = (Math.max(...zs) - Math.min(...zs)) / imgW;
+            const paddedFrac = Math.max(xFrac, yFrac, zFrac) * 1.4;
+            const xHalf = imgW * paddedFrac / 2;
+            const yHalf = imgH * paddedFrac / 2;
+            const zHalf = imgW * paddedFrac / 2;
+            return {
+                xRange: [xC - xHalf, xC + xHalf],
+                yRange: [yC - yHalf, yC + yHalf],
+                zRange: [zC - zHalf, zC + zHalf],
+                aspectRatio: {x: imgW / maxDim, y: imgH / maxDim, z: imgW / maxDim}
+            };
+        }
+
+        // Aggregates keypoints across ALL video frames to compute fixed axis ranges.
+        // View size = max(full-motion-range * 1.1, first-frame-body-size * 1.4):
+        //   - motion range ensures no keypoints go out of bounds during playback
+        //   - body size minimum ensures the skeleton never appears tiny when
+        //     the person barely moves (e.g. stationary golf address position)
+        // W:H aspect ratio of the view matches the video dimensions.
+        function computeAxisRangesAll(framesKp3d, imgW, imgH) {
+            const allX = [], allY = [], allZ = [];
+            const frameKeys = Object.keys(framesKp3d).map(Number).sort((a, b) => a - b);
+            frameKeys.forEach(k => {
+                allX.push(...framesKp3d[k].x);
+                allY.push(...framesKp3d[k].y);
+                allZ.push(...framesKp3d[k].z);
+            });
+            const maxDim = Math.max(imgW, imgH);
+            const xC = (Math.max(...allX) + Math.min(...allX)) / 2;
+            const yC = (Math.max(...allY) + Math.min(...allY)) / 2;
+            const zC = (Math.max(...allZ) + Math.min(...allZ)) / 2;
+
+            // Full motion range half-spans
+            const motionXHalf = (Math.max(...allX) - Math.min(...allX)) / 2;
+            const motionYHalf = (Math.max(...allY) - Math.min(...allY)) / 2;
+            const motionZHalf = (Math.max(...allZ) - Math.min(...allZ)) / 2;
+
+            // Body size half-spans from first frame (minimum zoom reference)
+            const fkp = framesKp3d[frameKeys[0]];
+            const bodyXHalf = (Math.max(...fkp.x) - Math.min(...fkp.x)) / 2;
+            const bodyYHalf = (Math.max(...fkp.y) - Math.min(...fkp.y)) / 2;
+            const bodyZHalf = (Math.max(...fkp.z) - Math.min(...fkp.z)) / 2;
+
+            // Normalise each half-span by its natural image-space scale:
+            // X → imgW, Y → imgH, Z → imgW (Z has the same dimension as camera width)
+            const viewFrac = Math.max(
+                motionXHalf / imgW * 1.1,
+                motionYHalf / imgH * 1.1,
+                motionZHalf / imgW * 1.1,
+                bodyXHalf   / imgW * 1.4,
+                bodyYHalf   / imgH * 1.4,
+                bodyZHalf   / imgW * 1.4
+            );
+
+            const xHalf = imgW * viewFrac;
+            const yHalf = imgH * viewFrac;
+            const zHalf = imgW * viewFrac;
+            return {
+                xRange: [xC - xHalf, xC + xHalf],
+                yRange: [yC - yHalf, yC + yHalf],
+                zRange: [zC - zHalf, zC + zHalf],
+                aspectRatio: {x: imgW / maxDim, y: imgH / maxDim, z: imgW / maxDim}
+            };
+        }
+
+        function buildSceneWithRanges(axisRanges) {
+            if (!axisRanges) return PLOTLY_LAYOUT.scene;
+            return Object.assign({}, PLOTLY_LAYOUT.scene, {
+                xaxis: Object.assign({}, PLOTLY_LAYOUT.scene.xaxis, {range: axisRanges.xRange}),
+                yaxis: Object.assign({}, PLOTLY_LAYOUT.scene.yaxis, {range: axisRanges.yRange}),
+                zaxis: Object.assign({}, PLOTLY_LAYOUT.scene.zaxis, {range: axisRanges.zRange}),
+                aspectratio: axisRanges.aspectRatio
+            });
+        }
+
+        function renderPose3D(divId, kp3d, height, axisRanges) {
             if (!kp3d) return;
-            const layout = height
-                ? Object.assign({}, PLOTLY_LAYOUT, {height})
-                : PLOTLY_LAYOUT;
+            const layout = Object.assign({}, PLOTLY_LAYOUT,
+                height ? {height} : {},
+                {scene: buildSceneWithRanges(axisRanges)}
+            );
             Plotly.react(divId, buildPoseTraces(kp3d), layout, {responsive: true, displaylogo: false});
         }
 
@@ -638,7 +731,10 @@
                         origImg.onload = function() {
                             const h = computePlotHeight('plot-div', this.naturalWidth, this.naturalHeight);
                             document.getElementById('plot-div').style.height = h + 'px';
-                            if (kp3d) renderPose3D('plot-div', kp3d, h);
+                            if (kp3d) {
+                                const axisRanges = computeAxisRanges(kp3d, this.naturalWidth, this.naturalHeight);
+                                renderPose3D('plot-div', kp3d, h, axisRanges);
+                            }
                         };
                         origImg.src = `/uploads/${filename}`;
                     } else {
@@ -722,7 +818,14 @@
             Object.entries(framesKp3d).forEach(([frame, kp3d]) => {
                 precomputedTraces[parseInt(frame)] = buildPoseTraces(kp3d);
             });
-            const plotLayout = Object.assign({}, PLOTLY_LAYOUT, {height: plotH});
+
+            // Fixed axis ranges from ALL frames combined — covers the full extent of motion
+            // so keypoints never go out of bounds as the person moves during the video
+            const axisRanges = Object.keys(framesKp3d).length > 0
+                ? computeAxisRangesAll(framesKp3d, vidW, vidH) : null;
+            const plotLayout = Object.assign({}, PLOTLY_LAYOUT,
+                {height: plotH, scene: buildSceneWithRanges(axisRanges)}
+            );
 
             let lastRenderedFrame = null;
 
