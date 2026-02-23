@@ -145,8 +145,8 @@
                     
                     <!-- 3D Visualization -->
                     <div class="mb-3">
-                        <h5>3D Visualization</h5>
-                        <img id="plot-image" class="img-fluid" style="max-width: 100%; width: 100%;">
+                        <h5>3D Visualization <small class="text-muted fw-normal" style="font-size:0.75rem;">드래그로 회전 · 스크롤로 줌</small></h5>
+                        <div id="plot-div" style="width:100%; height:500px; background:#16213e; border-radius:8px; transition: height 0.2s ease;"></div>
                     </div>
                 </div>
                 
@@ -166,8 +166,8 @@
                     
                     <!-- Pose visualization -->
                     <div class="mb-3">
-                        <p>Pose Visualization:</p>
-                        <img id="frame-plot" class="img-fluid" style="max-width: 100%; width: 100%; height: auto; object-fit: contain; background-color: #f8f9fa;">
+                        <p>Pose Visualization: <small class="text-muted" style="font-size:0.75rem;">드래그로 회전 · 스크롤로 줌</small></p>
+                        <div id="frame-plot-div" style="width:100%; height:500px; background:#16213e; border-radius:8px; transition: height 0.2s ease;"></div>
                     </div>
                 </div>
                 
@@ -179,8 +179,109 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script>
-        // Global variables
+        // ── Plotly 3D skeleton constants ──────────────────────────────────────
+        const KEYPOINT_NAMES = [
+            'TOP','NECK','RIGHT_SHOULDER','RIGHT_ELBOW','RIGHT_WRIST',
+            'LEFT_SHOULDER','LEFT_ELBOW','LEFT_WRIST','RIGHT_HIP','RIGHT_KNEE',
+            'RIGHT_ANKLE','LEFT_HIP','LEFT_KNEE','LEFT_ANKLE','NOSE',
+            'RIGHT_EYE','RIGHT_EAR','LEFT_EYE','LEFT_EAR','SPINE',
+            'RIGHT_FINGER','RIGHT_TOE','LEFT_FINGER','LEFT_TOE','STERNUM','SACRUM'
+        ];
+        const BONE_CONNECTIONS = [
+            {from:0,  to:1,  color:'rgb(25,175,25)'},   // TOP-NECK
+            {from:1,  to:2,  color:'rgb(25,25,175)'},   // NECK-R_SHOULDER
+            {from:1,  to:5,  color:'rgb(255,25,25)'},   // NECK-L_SHOULDER
+            {from:7,  to:6,  color:'rgb(255,25,25)'},   // L_WRIST-L_ELBOW
+            {from:6,  to:5,  color:'rgb(255,25,25)'},   // L_ELBOW-L_SHOULDER
+            {from:5,  to:2,  color:'rgb(25,175,25)'},   // L_SHOULDER-R_SHOULDER
+            {from:2,  to:3,  color:'rgb(25,25,175)'},   // R_SHOULDER-R_ELBOW
+            {from:3,  to:4,  color:'rgb(25,25,175)'},   // R_ELBOW-R_WRIST
+            {from:19, to:24, color:'rgb(25,175,25)'},   // SPINE-STERNUM
+            {from:11, to:8,  color:'rgb(25,175,25)'},   // L_HIP-R_HIP
+            {from:19, to:25, color:'rgb(25,175,25)'},   // SPINE-SACRUM
+            {from:11, to:12, color:'rgb(255,25,25)'},   // L_HIP-L_KNEE
+            {from:12, to:13, color:'rgb(255,25,25)'},   // L_KNEE-L_ANKLE
+            {from:8,  to:9,  color:'rgb(25,25,175)'},   // R_HIP-R_KNEE
+            {from:9,  to:10, color:'rgb(25,25,175)'},   // R_KNEE-R_ANKLE
+            {from:14, to:0,  color:'rgb(25,175,25)'},   // NOSE-TOP
+            {from:14, to:1,  color:'rgb(25,175,25)'},   // NOSE-NECK
+            {from:14, to:15, color:'rgb(25,25,175)'},   // NOSE-R_EYE
+            {from:14, to:17, color:'rgb(255,25,25)'},   // NOSE-L_EYE
+            {from:15, to:16, color:'rgb(25,25,175)'},   // R_EYE-R_EAR
+            {from:17, to:18, color:'rgb(255,25,25)'},   // L_EYE-L_EAR
+            {from:24, to:2,  color:'rgb(25,25,175)'},   // STERNUM-R_SHOULDER
+            {from:24, to:5,  color:'rgb(255,25,25)'},   // STERNUM-L_SHOULDER
+            {from:25, to:8,  color:'rgb(25,25,175)'},   // SACRUM-R_HIP
+            {from:25, to:11, color:'rgb(255,25,25)'},   // SACRUM-L_HIP
+            {from:4,  to:20, color:'rgb(25,25,175)'},   // R_WRIST-R_FINGER
+            {from:7,  to:22, color:'rgb(255,25,25)'},   // L_WRIST-L_FINGER
+            {from:10, to:21, color:'rgb(25,25,175)'},   // R_ANKLE-R_TOE
+            {from:13, to:23, color:'rgb(255,25,25)'},   // L_ANKLE-L_TOE
+        ];
+
+        const PLOTLY_LAYOUT = {
+            paper_bgcolor: '#16213e',
+            scene: {
+                bgcolor: '#16213e',
+                xaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
+                yaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
+                zaxis: {showticklabels:false, title:'', showgrid:true, gridcolor:'#2a3a5a', zeroline:false},
+                aspectmode: 'cube',
+                camera: {eye: {x:0.1, y:-2.0, z:0.3}}
+            },
+            margin: {l:0, r:0, t:0, b:0},
+            uirevision: 'fixed'  // keeps camera angle when data updates
+        };
+
+        function buildPoseTraces(kp3d) {
+            // Group bones by color into 3 line traces (right/left/center)
+            const colorGroups = {};
+            BONE_CONNECTIONS.forEach(bone => {
+                if (!colorGroups[bone.color]) colorGroups[bone.color] = {x:[], y:[], z:[]};
+                colorGroups[bone.color].x.push(kp3d.x[bone.from], kp3d.x[bone.to], null);
+                colorGroups[bone.color].y.push(kp3d.y[bone.from], kp3d.y[bone.to], null);
+                colorGroups[bone.color].z.push(kp3d.z[bone.from], kp3d.z[bone.to], null);
+            });
+
+            const traces = Object.entries(colorGroups).map(([color, coords]) => ({
+                type: 'scatter3d', mode: 'lines',
+                x: coords.x, y: coords.y, z: coords.z,
+                line: {color, width: 5},
+                hoverinfo: 'none', showlegend: false
+            }));
+
+            // Joint markers
+            traces.push({
+                type: 'scatter3d', mode: 'markers',
+                x: kp3d.x, y: kp3d.y, z: kp3d.z,
+                marker: {size: 4, color: '#e0e0ff', opacity: 0.9},
+                hovertext: KEYPOINT_NAMES, hoverinfo: 'text',
+                showlegend: false
+            });
+
+            return traces;
+        }
+
+        // Returns pixel height that matches imgW:imgH aspect ratio, capped at 85vh
+        function computePlotHeight(divId, imgW, imgH) {
+            const div = document.getElementById(divId);
+            const containerW = (div.parentElement || div).clientWidth || 600;
+            const natural = Math.round(containerW * imgH / imgW);
+            const maxH = Math.round(window.innerHeight * 0.85);
+            return Math.min(natural, maxH);
+        }
+
+        function renderPose3D(divId, kp3d, height) {
+            if (!kp3d) return;
+            const layout = height
+                ? Object.assign({}, PLOTLY_LAYOUT, {height})
+                : PLOTLY_LAYOUT;
+            Plotly.react(divId, buildPoseTraces(kp3d), layout, {responsive: true, displaylogo: false});
+        }
+
+        // ── Global variables ──────────────────────────────────────────────────
         let mediaStream = null;
         let mediaRecorder = null;
         let recordedChunks = [];
@@ -189,9 +290,9 @@
         let uploadedFile = null;
         let countdownInterval = null;
         let keypoints_data = null; // Store keypoints data for CSV download
-        let videoInfo = null; // Store video info
-        let framePlots = {}; // Store frame plots
-        let frameMap = {}; // Map video time to frame number
+        let videoInfo = null;
+        let framesKp3d = {}; // frame_index -> {x, y, z}
+        let frameMap = {}; // frame_index -> time in seconds
         
         // DOM Elements
         const videoPreview = document.getElementById('video-preview');
@@ -217,7 +318,6 @@
         const imagePlotContainer = document.getElementById('image-plot-container');
         const videoResultContainer = document.getElementById('video-result-container');
         const originalVideo = document.getElementById('original-video');
-        const framePlot = document.getElementById('frame-plot');
         const playPauseBtn = document.getElementById('play-pause-btn');
         const videoSlider = document.getElementById('video-slider');
         const currentFrameText = document.getElementById('current-frame');
@@ -532,27 +632,23 @@
                         // Show image visualization
                         document.getElementById('image-result-container').classList.remove('d-none');
                         videoResultContainer.classList.add('d-none');
-                        
-                        // Set original image
-                        const originalImage = document.getElementById('original-image');
-                        originalImage.src = `/uploads/${filename}`;
-                        
-                        // Display plot if available
-                        const plotImage = document.getElementById('plot-image');
-                        
-                        if (data.results.plot) {
-                            plotImage.src = 'data:image/png;base64,' + data.results.plot;
-                        }
+
+                        const origImg = document.getElementById('original-image');
+                        const kp3d = data.results.keypoints_3d;
+                        origImg.onload = function() {
+                            const h = computePlotHeight('plot-div', this.naturalWidth, this.naturalHeight);
+                            document.getElementById('plot-div').style.height = h + 'px';
+                            if (kp3d) renderPose3D('plot-div', kp3d, h);
+                        };
+                        origImg.src = `/uploads/${filename}`;
                     } else {
                         // It's a video, show video visualization
                         document.getElementById('image-result-container').classList.add('d-none');
                         videoResultContainer.classList.remove('d-none');
-                        
-                        // Store video info and plots
+
                         videoInfo = data.results.video_info;
-                        framePlots = data.results.plots || {};
-                        
-                        // Set up video player
+                        framesKp3d = data.results.frames_3d || {};
+
                         setupVideoPlayer(filename, data.results);
                     }
                     
@@ -576,64 +672,95 @@
             });
         }
         
-        // New function to set up video player with pose visualization
         function setupVideoPlayer(filename, results) {
-            // Set up the original video source
             originalVideo.src = `/uploads/${filename}`;
-            
-            // Set up frame maps
+
             const fps = results.video_info.fps;
-            const frameInterval = 10; // Same interval used on server
-            const processedFrames = {};
-            
-            // Map all frames that were processed
-            results.keypoints.forEach(kp => {
-                processedFrames[kp.frame] = true;
+            const vidW = results.video_info.width;
+            const vidH = results.video_info.height;
+            const plotH = computePlotHeight('frame-plot-div', vidW, vidH);
+            document.getElementById('frame-plot-div').style.height = plotH + 'px';
+
+            frameMap = {};
+
+            // Collect unique processed frame numbers from keypoints
+            const processedFrameSet = {};
+            results.keypoints.forEach(kp => { processedFrameSet[kp.frame] = true; });
+            const processedFrameNumbers = Object.keys(processedFrameSet).map(Number).sort((a, b) => a - b);
+            const maxFrame = processedFrameNumbers[processedFrameNumbers.length - 1] || 1;
+
+            // Initial estimate using OpenCV fps (may be inaccurate for some codecs)
+            const safeFps = fps > 0 ? fps : 30;
+            processedFrameNumbers.forEach(fn => { frameMap[fn] = fn / safeFps; });
+
+            // Recalculate using actual browser-reported duration once metadata loads
+            // This is the ground truth and fixes fps mismatch (WebM, variable-fps, etc.)
+            function rebuildFrameMap(duration) {
+                processedFrameNumbers.forEach(fn => {
+                    frameMap[fn] = (fn / maxFrame) * duration;
+                });
+            }
+
+            // Binary search: find index of closest processed frame to currentTime
+            function closestFrameIndex(currentTime) {
+                let lo = 0, hi = processedFrameNumbers.length - 1;
+                while (lo < hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (frameMap[processedFrameNumbers[mid]] < currentTime) lo = mid + 1;
+                    else hi = mid;
+                }
+                if (lo > 0 &&
+                    Math.abs(frameMap[processedFrameNumbers[lo - 1]] - currentTime) <
+                    Math.abs(frameMap[processedFrameNumbers[lo]] - currentTime)) {
+                    lo--;
+                }
+                return lo;
+            }
+
+            // Pre-compute all Plotly traces upfront so rendering is just a Plotly.react call
+            const precomputedTraces = {};
+            Object.entries(framesKp3d).forEach(([frame, kp3d]) => {
+                precomputedTraces[parseInt(frame)] = buildPoseTraces(kp3d);
             });
-            
-            const processedFrameNumbers = Object.keys(processedFrames).map(Number).sort((a, b) => a - b);
-            
-            // Create frame-to-time mapping
-            processedFrameNumbers.forEach(frameNum => {
-                const timeInSeconds = frameNum / fps;
-                frameMap[frameNum] = timeInSeconds;
-            });
-            
-            // Set up video event listeners
+            const plotLayout = Object.assign({}, PLOTLY_LAYOUT, {height: plotH});
+
+            let lastRenderedFrame = null;
+
+            function renderFrame(frameNum) {
+                if (!precomputedTraces[frameNum] || frameNum === lastRenderedFrame) return;
+                Plotly.react('frame-plot-div', precomputedTraces[frameNum], plotLayout,
+                             {responsive: true, displaylogo: false});
+                lastRenderedFrame = frameNum;
+            }
+
+            function updateAtTime(currentTime) {
+                const idx = closestFrameIndex(currentTime);
+                const closestFrame = processedFrameNumbers[idx];
+                renderFrame(closestFrame);
+                videoSlider.value = currentTime;
+                currentFrameText.textContent = `${idx + 1}/${processedFrameNumbers.length}`;
+            }
+
             originalVideo.addEventListener('loadedmetadata', () => {
-                // Update slider max value
                 videoSlider.max = originalVideo.duration;
                 currentFrameText.textContent = `0/${processedFrameNumbers.length}`;
+                rebuildFrameMap(originalVideo.duration);
             });
-            
-            originalVideo.addEventListener('timeupdate', () => {
-                // Update the slider position
-                videoSlider.value = originalVideo.currentTime;
-                
-                // Find the closest processed frame to the current time
-                const currentTimeInSeconds = originalVideo.currentTime;
-                let closestFrame = processedFrameNumbers[0];
-                let minDiff = Math.abs(frameMap[closestFrame] - currentTimeInSeconds);
-                
-                processedFrameNumbers.forEach(frameNum => {
-                    const diff = Math.abs(frameMap[frameNum] - currentTimeInSeconds);
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        closestFrame = frameNum;
-                    }
-                });
-                
-                // Update the visualization image if we have a plot for this frame
-                if (framePlots[closestFrame]) {
-                    framePlot.src = 'data:image/png;base64,' + framePlots[closestFrame];
+
+            // requestVideoFrameCallback fires on every rendered video frame (~30/s for 30fps)
+            // Falls back to timeupdate (~4/s) on older browsers
+            if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+                function onVideoFrame(now, metadata) {
+                    updateAtTime(metadata.mediaTime);
+                    originalVideo.requestVideoFrameCallback(onVideoFrame);
                 }
-                
-                // Update current frame text
-                const frameIndex = processedFrameNumbers.indexOf(closestFrame);
-                currentFrameText.textContent = `${frameIndex + 1}/${processedFrameNumbers.length}`;
-            });
-            
-            // Play/Pause button handler
+                originalVideo.requestVideoFrameCallback(onVideoFrame);
+            } else {
+                originalVideo.addEventListener('timeupdate', () => {
+                    updateAtTime(originalVideo.currentTime);
+                });
+            }
+
             playPauseBtn.addEventListener('click', () => {
                 if (originalVideo.paused) {
                     originalVideo.play();
@@ -643,15 +770,17 @@
                     playPauseBtn.textContent = 'Play';
                 }
             });
-            
-            // Slider input handler
+
+            // Slider: immediate pose update on scrub (rVFC doesn't fire when paused)
             videoSlider.addEventListener('input', () => {
-                originalVideo.currentTime = videoSlider.value;
+                const t = parseFloat(videoSlider.value);
+                originalVideo.currentTime = t;
+                updateAtTime(t);
             });
-            
-            // Load the first frame visualization if available
-            if (processedFrameNumbers.length > 0 && framePlots[processedFrameNumbers[0]]) {
-                framePlot.src = 'data:image/png;base64,' + framePlots[processedFrameNumbers[0]];
+
+            // Render first frame immediately
+            if (processedFrameNumbers.length > 0) {
+                renderFrame(processedFrameNumbers[0]);
             }
         }
         

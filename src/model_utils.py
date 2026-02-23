@@ -3,12 +3,7 @@ import tensorflow as tf
 import numpy as np
 import logging
 import cv2
-import matplotlib
-# Set Matplotlib to use a non-GUI backend to avoid thread issues
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import tempfile
-import os
 import gc
 from enum import Enum
 
@@ -81,6 +76,11 @@ com_weights = np.array([
         0.067334,
         0.036966,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+# Smoothing parameters (from VFInference iOS reference implementation)
+EMA_ALPHA_XY = 0.7   # EMA weight for current X/Y frame
+EMA_ALPHA_Z = 0.2    # EMA weight for current Z frame
+GAUSSIAN_KERNEL = np.array([0.004432, 0.053991, 0.241971, 0.398942, 0.241971, 0.053991, 0.004432])
 
 class KeyPoints(Enum):
     TOP = 0
@@ -369,6 +369,54 @@ def add_sternum_sacrum(keypoints):
 
     return kp_sternum_sacrum
 
+def compute_pose_3d(img_h, img_w, normalized_coords, z_scaled):
+    """
+    Compute 3D keypoints (26 total, including sternum and sacrum)
+    for interactive Plotly visualization.
+
+    Returns a dict with 'x', 'y', 'z' float lists.
+    """
+    mock_img = type('_I', (), {'shape': (img_h, img_w, 3)})()
+    keypoints = adjust_camera_view(mock_img, normalized_coords, z_scaled)
+    kp = add_sternum_sacrum(keypoints)
+    return {
+        'x': kp[:, 0].tolist(),
+        'y': kp[:, 1].tolist(),
+        'z': kp[:, 2].tolist(),
+    }
+
+def _convolve_1d(data, kernel):
+    """1D convolution with edge normalization (no zero-padding)."""
+    n = len(data)
+    half = len(kernel) // 2
+    output = np.empty(n)
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        w = kernel[(half - (i - lo)):(half - (i - lo)) + (hi - lo)]
+        output[i] = np.dot(data[lo:hi], w) / w.sum()
+    return output
+
+
+def gaussian_smooth_frames_3d(frames_3d):
+    """Apply 7-tap Gaussian smoothing across frames for each keypoint axis."""
+    frame_indices = sorted(frames_3d.keys())
+    if len(frame_indices) < 2:
+        return frames_3d
+    n_kp = len(frames_3d[frame_indices[0]]['x'])
+    traj = {ax: np.zeros((n_kp, len(frame_indices))) for ax in ('x', 'y', 'z')}
+    for t, fi in enumerate(frame_indices):
+        for ax in ('x', 'y', 'z'):
+            traj[ax][:, t] = frames_3d[fi][ax]
+    smoothed = {fi: {'x': [], 'y': [], 'z': []} for fi in frame_indices}
+    for kp_idx in range(n_kp):
+        for ax in ('x', 'y', 'z'):
+            sv = _convolve_1d(traj[ax][kp_idx], GAUSSIAN_KERNEL)
+            for t, fi in enumerate(frame_indices):
+                smoothed[fi][ax].append(float(sv[t]))
+    return smoothed
+
+
 def predict(image_path, model=None):
     """
     Make a prediction on an image.
@@ -418,16 +466,16 @@ def predict(image_path, model=None):
         logger.error(f"Error making prediction: {e}")
         raise
 
-def process_video(video_path, model=None, frame_interval=5):
+def process_video(video_path, model=None, frame_interval=1):
     """Process video for pose estimation with batch processing.
-    
+
     Args:
         video_path: Path to the video file
         model: The model to use (loads the global model if None)
-        frame_interval: Process every nth frame
-        
+        frame_interval: Process every nth frame (default 1 = all frames)
+
     Returns:
-        Dictionary containing keypoints_all, video_info, and plots
+        Dictionary containing keypoints_all, video_info, and frames_3d
     """
     if model is None:
         model = load_model()
@@ -468,7 +516,11 @@ def process_video(video_path, model=None, frame_interval=5):
     # Process frames in batches
     BATCH_SIZE = 8
     keypoints_all = []
-    plots = {}  # Dictionary to store frame_index -> plot_base64
+    frames_3d = {}  # Dictionary to store frame_index -> {x, y, z}
+
+    # EMA smoothing state (reset per video)
+    ema_prev_norm = None
+    ema_prev_z = None
     
     for batch_start in range(0, len(frames), BATCH_SIZE):
         batch_end = min(batch_start + BATCH_SIZE, len(frames))
@@ -517,16 +569,27 @@ def process_video(video_path, model=None, frame_interval=5):
             y_std = np.std([p[1] for p in real_coords]) / np.max((height, width))
             scale = (x_std + y_std) / 2
             z_scaled = z_coords * scale
-            
-            # Generate 3D plot for keyframes
-            plot_base64 = None
+
+            # Apply EMA smoothing
+            if ema_prev_norm is not None:
+                normalized_coords = [
+                    (EMA_ALPHA_XY * c[0] + (1 - EMA_ALPHA_XY) * p[0],
+                     EMA_ALPHA_XY * c[1] + (1 - EMA_ALPHA_XY) * p[1],
+                     c[2])
+                    for c, p in zip(normalized_coords, ema_prev_norm)
+                ]
+                z_scaled = EMA_ALPHA_Z * z_scaled + (1 - EMA_ALPHA_Z) * ema_prev_z
+            ema_prev_norm = normalized_coords
+            ema_prev_z = z_scaled.copy()
+
+            # Compute 3D coordinates for Plotly visualization
             try:
-                plot_base64 = plot_keypoints_to_base64(frame, normalized_coords, z_scaled)
+                kp3d = compute_pose_3d(height, width, normalized_coords, z_scaled)
+                frames_3d[frame_index] = kp3d
             except Exception as e:
-                logger.warning(f"Could not generate plot for frame {frame_index}: {e}")
-            
+                logger.warning(f"Could not compute 3D pose for frame {frame_index}: {e}")
+
             # Prepare keypoint data for this frame
-            from src.model_utils import KeyPoints
             frame_keypoints = []
             
             for j, point in enumerate(real_coords):
@@ -548,16 +611,17 @@ def process_video(video_path, model=None, frame_interval=5):
                 }
                 frame_keypoints.append(keypoint)
             
-            # Add keypoints and plot to results
+            # Add keypoints to results
             keypoints_all.extend(frame_keypoints)
-            if plot_base64:
-                plots[frame_index] = plot_base64
         
         # Free memory
         gc.collect()
     
-    logger.info(f"Processed {len(keypoints_all) // 24} frames, generated {len(plots)} plots")
-    
+    logger.info(f"Processed {len(keypoints_all) // 24} frames, generated {len(frames_3d)} 3D poses")
+
+    # Apply post-hoc Gaussian smoothing across all frames
+    frames_3d = gaussian_smooth_frames_3d(frames_3d)
+
     # Return all required data
     return {
         'keypoints': keypoints_all,
@@ -568,116 +632,6 @@ def process_video(video_path, model=None, frame_interval=5):
             'total_frames': total_frames,
             'processed_frames': len(frames)
         },
-        'plots': plots
+        'frames_3d': frames_3d
     }
 
-def plot_view(fig, grid_position, image, view_name, keypoints, visibility_threshold=0.7, color='blue'):
-        """
-        Plot a view of the keypoints on an image.
-        
-        Args:
-            fig: matplotlib figure
-            grid_position: tuple of (nrows, ncols, index) for subplot
-            image: Image as numpy array
-            view_name: Title for the view
-            keypoints: 3D keypoints
-            color: Color for the keypoints and lines
-            
-        Returns:
-            matplotlib axes object
-        """
-        # Unpack grid position to ensure correct format for add_subplot
-        rows, cols, idx = grid_position
-        ax = fig.add_subplot(rows, cols, idx, projection='3d')
-        ax.set_title(view_name)
-        ax.set_box_aspect((1, 1, 1))
-
-        if view_name.lower().startswith('side'):
-            keypoints = keypoints[:, [2, 1, 0]]
-        elif view_name.lower().startswith('back'):
-            new_keypoints = keypoints.copy()
-            new_keypoints[:, 0] = -keypoints[:, 0]
-            new_keypoints[:, 2] = -keypoints[:, 2]
-            keypoints = new_keypoints
-
-        ax.scatter3D(keypoints[:, 0], keypoints[:, 1], keypoints[:, 2], color=color)
-        
-        for line in KeyPointConnections.links:
-            ax.plot3D((keypoints[line["from"].value, 0], keypoints[line["to"].value, 0]),
-                    (keypoints[line["from"].value, 1], keypoints[line["to"].value, 1]),
-                    (keypoints[line["from"].value, 2], keypoints[line["to"].value, 2]), color=color)
-        ax.set_xlim(np.mean(keypoints[:, 0])-image.shape[1]/2, np.mean(keypoints[:, 0])+image.shape[1]/2)
-        ax.set_ylim(np.mean(keypoints[:, 1])-image.shape[0]/2, np.mean(keypoints[:, 1])+image.shape[0]/2)
-        ax.set_zlim(np.mean(keypoints[:, 2])-np.max(image.shape)/2, np.mean(keypoints[:, 2])+np.max(image.shape)/2)
-        
-        ax.view_init(elev=-90, azim=-90)
-        ax.set_zticks([])
-        
-        return ax
-
-def plot_keypoints_to_base64(image, keypoints_2d, keypoints_3d=None, figsize=(10, 10), color='blue'):
-    """
-    Plot keypoints on an image and convert to base64 for web display.
-    
-    Args:
-        image: Image as numpy array
-        keypoints_2d: Array of 2d keypoints [x, y]
-        keypoints_3d: Array of 3d keypoints [z]
-        figsize: Figure size
-        color: Color of the keypoints
-        
-    Returns:
-        base64 encoded string of the plot image
-    """
-    import io
-    import base64
-    
-    try:
-        # Create the plot figure
-        fig = plot_keypoints(image, keypoints_2d, keypoints_3d, figsize, color)
-        
-        # Save the figure to a BytesIO object
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
-        buf.seek(0)
-        
-        # Encode the image to base64
-        img_str = base64.b64encode(buf.getvalue()).decode('utf-8')
-        
-        # Close the figure to free memory
-        plt.close(fig)
-        
-        return img_str
-    except Exception as e:
-        logger.error(f"Error creating 3D plot: {e}", exc_info=True)
-        # Return None to indicate failure
-        return None
-
-def plot_keypoints(image, keypoints_2d, keypoints_3d, figsize=(10, 10), color='blue'):
-    """
-    Plot keypoints on an image using matplotlib.
-    
-    Args:
-        image: Image as numpy array
-        keypoints_2d: Array of 2d keypoints [x, y]
-        keypoints_3d: Array of 3d keypoints [z]
-        figsize: Figure size
-        color: Color for plotting
-        
-    Returns:
-        Matplotlib figure
-    """
-    keypoints = adjust_camera_view(image, keypoints_2d, keypoints_3d)
-    kp_sternum_sacrum = add_sternum_sacrum(keypoints)
-
-    # Create a figure with 3 subplots for different views
-    fig = plt.figure(figsize=(figsize[0]*2, figsize[1]))
-    
-    # 1. Front view (original)
-    plot_view(fig, (1, 2, 1), image, 'Front View', kp_sternum_sacrum, color=color)
-    
-    # 2. Side view (90 degrees rotated along x-axis)
-    plot_view(fig, (1, 2, 2), image, 'Side View (90° X-Rotation)', kp_sternum_sacrum, color=color)
-    
-    plt.tight_layout()
-    return fig

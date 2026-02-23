@@ -8,8 +8,6 @@ python-dotenv==1.0.0
 tensorflow==2.14.0
 numpy==1.26.4
 Pillow==10.0.0
-cryptography==41.0.3 
 gunicorn
 google-cloud-storage
 opencv-python
-matplotlib

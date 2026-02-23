@@ -149,13 +149,12 @@ def process_media():
                                 'z': float(i * 0.1),
                                 'confidence': float(0.9 - i*0.02)
                             })
-                        plot_base64 = None
                         return jsonify({
                             'success': True,
                             'results': {
                                 'message': f'Processed {file_type} {filename} with mock data (model not available)',
                                 'keypoints': keypoints,
-                                'plot': plot_base64
+                                'keypoints_3d': None
                             }
                         })
                     else:
@@ -184,14 +183,10 @@ def process_media():
                     }
                     keypoints.append(keypoint)
                 
-                # Generate 3D plot as base64 image
-                app.logger.info("Generating 3D plot")
-                plot_base64 = model_utils.plot_keypoints_to_base64(org_img, normalized_coords, z_scaled)
-                
-                if plot_base64 is None:
-                    app.logger.warning("Could not generate 3D plot, but keypoints were detected")
-                else:
-                    app.logger.info("3D plot generated successfully")
+                # Compute 3D coordinates for Plotly visualization
+                keypoints_3d = model_utils.compute_pose_3d(
+                    org_img.shape[0], org_img.shape[1], normalized_coords, z_scaled
+                )
                 
             except Exception as model_error:
                 app.logger.error(f"Error using model: {str(model_error)}", exc_info=True)
@@ -208,7 +203,6 @@ def process_media():
                         'z': float(i * 0.1),
                         'confidence': float(0.9 - i*0.02)
                     })
-                plot_base64 = None
                 return jsonify({
                     'success': False,
                     'error': f"Error processing image: {str(model_error)}"
@@ -273,25 +267,23 @@ def process_media():
                         # In production, report the error
                         raise ValueError(f"Failed to load pose estimation model for video: {str(model_load_error)}")
                 
-                # Process the video frames
-                frame_interval = 3  # Process every 3rd frame
-                video_results = model_utils.process_video(file_path, model, frame_interval=frame_interval)
-                
-                # The process_video function now directly returns the formatted data
+                # Process the video frames (all frames, frame_interval=1)
+                video_results = model_utils.process_video(file_path, model, frame_interval=1)
+
                 keypoints = video_results['keypoints']
                 video_info = video_results['video_info']
-                plots = video_results['plots']
-                
+                frames_3d = video_results['frames_3d']
+
                 app.logger.info(f"Processed video with {video_info['processed_frames']} frames")
                 app.logger.info(f"Total keypoints: {len(keypoints)}")
-                
+
                 return jsonify({
                     'success': True,
                     'results': {
                         'message': f'Processed {file_type} {filename}',
                         'keypoints': keypoints,
                         'video_info': video_info,
-                        'plots': plots
+                        'frames_3d': frames_3d
                     }
                 })
                 
@@ -322,7 +314,7 @@ def process_media():
             'results': {
                 'message': f'Processed {file_type} {filename}',
                 'keypoints': keypoints,
-                'plot': plot_base64
+                'keypoints_3d': keypoints_3d
             }
         })
     
